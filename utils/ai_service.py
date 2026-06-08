@@ -24,8 +24,15 @@ import aiohttp
 log = logging.getLogger("MaltaSMP.AI")
 
 # ── Configuration from environment ───────────────────────────────────────────
-OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "anthropic/claude-sonnet-4")
+AI_PROVIDER = os.getenv("AI_PROVIDER", "github").lower()
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o")
+
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_MODEL = os.getenv("GITHUB_MODEL", "openai/gpt-4o")
+GITHUB_BASE_URL = "https://models.github.ai/inference/chat/completions"
+
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # ── Retry settings ────────────────────────────────────────────────────────────
@@ -169,7 +176,10 @@ async def chat_completion(
 
     Returns the model's reply text, or a fallback string on failure.
     """
-    if not OPENROUTER_API_KEY:
+    if AI_PROVIDER == "github" and not GITHUB_TOKEN:
+        log.warning("GITHUB_TOKEN not set — returning fallback response")
+        return _FALLBACK_CHAT
+    if AI_PROVIDER != "github" and not OPENROUTER_API_KEY:
         log.warning("OPENROUTER_API_KEY not set — returning fallback response")
         return _FALLBACK_CHAT
 
@@ -188,18 +198,29 @@ async def chat_completion(
             return cached
 
     payload = {
-        "model": OPENROUTER_MODEL,
+        "model": GITHUB_MODEL if AI_PROVIDER == "github" else OPENROUTER_MODEL,
         "messages": [{"role": "system", "content": system}] + messages if system else messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
 
-    session = _get_session()
+    if AI_PROVIDER == "github":
+        session = aiohttp.ClientSession(
+            headers={
+                "Authorization": f"Bearer {GITHUB_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            timeout=aiohttp.ClientTimeout(total=30),
+        )
+        target_url = GITHUB_BASE_URL
+    else:
+        session = _get_session()
+        target_url = OPENROUTER_BASE_URL
     delay = BASE_RETRY_DELAY
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            async with session.post(OPENROUTER_BASE_URL, json=payload) as resp:
+            async with session.post(target_url, json=payload) as resp:
                 if resp.status == 429:
                     log.warning(f"OpenRouter 429 on attempt {attempt}/{MAX_RETRIES}")
                     if attempt < MAX_RETRIES:
